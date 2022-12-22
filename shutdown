@@ -1,0 +1,127 @@
+#!/bin/bash
+
+# Automated shutdown script
+#sshpass -p Augentic@123
+
+#create environment variable containing ssh password to esxi hosts
+export SSH_ASKPASS="./esxi-password"
+
+#IDs of VMs to shutdown
+declare -a SERVERIDS=(
+[0]=11
+[1]=42
+[2]=12
+[3]=21
+)
+
+# New variable to allow script testing, assuming the vim commands all work to issue shutdowns
+# can be "0" or "1"
+TEST=0
+
+# script waits WAIT_TRYS times, WAIT_TIME seconds each time
+# number of times to wait for a VM to shutdown cleanly before forcing power off.
+WAIT_TRYS=20
+
+# how long to wait in seconds each time for a VM to shutdown.
+WAIT_TIME=10
+
+validate_shutdown()
+{
+   if [ $SRVID_HOST -eq 1 ]; then 
+       setsid ssh -l root 192.168.0.108 "/bin/vim-cmd vmsvc/power.getstate $SRVID_EXACT | grep -i \"off\" > /dev/null 2<&1"
+    else
+       if [ $SRVID_HOST -eq 2 ]; then
+          setsid ssh -l root 192.168.0.109 "/bin/vim-cmd vmsvc/power.getstate $SRVID_EXACT | grep -i \"off\" > /dev/null 2<&1"
+       fi
+    fi 
+    
+    STATUS=$?
+
+    if [ $STATUS -ne 0 ]; then
+        if [ $TRY -lt $WAIT_TRYS ]; then
+            # if the vm is not off, wait for it to shut down
+            TRY=$((TRY + 1))
+            echo "Waiting for guest VM ID $VMID of esxi host $SRVID_HOST to shutdown (attempt #$TRY)..."
+            sleep $WAIT_TIME
+            validate_shutdown
+        else
+            # force power off and wait a little (you could use vmsvc/power.suspend here instead)
+            echo "Unable to gracefully shutdown guest VM ID $VMID... forcing power off."
+            if [ $TEST -eq 0 ]; then
+              if [ $SRVID_HOST -eq 1 ]; then 
+                 setsid ssh -l root 192.168.0.108 "/bin/vim-cmd vmsvc/power.off $VMID"
+              else
+                 if [ $SRVID_HOST -eq 2 ]; then
+                     setsid ssh -l root 192.168.0.109 "/bin/vim-cmd vmsvc/power.off $VMID"
+                 fi
+              fi
+                
+            fi
+            sleep $WAIT_TIME
+        fi
+    fi
+}
+
+
+# read each line as a server ID and shutdown/poweroff
+for SRVID in ${SERVERIDS[@]}
+do
+    TRY=0
+    VMID=$(expr $SRVID / 10)
+    SRVID_HOST=$(expr $SRVID % 10)
+
+    if [ $SRVID_HOST -eq 1 ]; then 
+      setsid ssh -l root 192.168.0.108 "/bin/vim-cmd vmsvc/power.getstate $VMID | grep -i \"off\|Suspended\" > /dev/null 2<&1"
+    else
+       if [ $SRVID_HOST -eq 2 ]; then
+          setsid ssh -l root 192.168.0.109 "/bin/vim-cmd vmsvc/power.getstate $VMID | grep -i \"off\|Suspended\" > /dev/null 2<&1"
+       fi
+    fi    
+    STATUS=$?
+
+    if [ $STATUS -ne 0 ]; then
+        echo "Attempting shutdown of guest VM ID $VMID of ESXI host $SRVID_HOST ..."
+        if [ $TEST -eq 0 ]; then
+            if [ $SRVID_HOST -eq 1 ]; then 
+               setsid ssh -l root 192.168.0.108 "/bin/vim-cmd vmsvc/power.shutdown $VMID"
+            else
+               if [ $SRVID_HOST -eq 2 ]; then
+                  setsid ssh -l root 192.168.0.109 "/bin/vim-cmd vmsvc/power.shutdown $VMID"
+               fi
+            fi
+        fi
+        validate_shutdown
+    else
+        echo "Guest VM ID $VMID of esxi host $SRVID_HOST already off..."
+    fi
+done
+
+# guest vm shutdown complete
+echo "Guest VMs shutdown complete..."
+
+# enter maintenance mode immediately
+echo "Entering maintenance mode..."
+if [ $TEST -eq 0 ]; then
+    echo "Entering maintenance mode ESXI host 2 ..."
+    setsid ssh -l root 192.168.0.109 "/bin/esxcli system maintenanceMode set -e true -t 0 &"
+    echo "Entering maintenance mode ESXI host 1 ..."    
+    #ssh -l root 192.168.0.108 "/bin/esxcli system maintenanceMode set -e true -t 0 &"
+    setsid sssh -l root 192.168.0.108 "/bin/esxcli system maintenanceMode set -e true -t 0 &"
+fi
+
+# exit maintenance mode immediately before server has a chance to shutdown/power off
+# NOTE: it is possible for this to fail, leaving the server in maintenance mode on reboot!
+# echo "Exiting maintenance mode..."
+# if [ $TEST -eq 0 ]; then
+#     ssh -l root 192.168.0.109 "/bin/esxcli system maintenanceMode set -e false -t 0"
+#     ssh -l root 192.168.0.108 "/bin/esxcli system maintenanceMode set -e false -t 0"
+# fi
+
+# shutdown the ESXi host
+echo "Shutting down ESXi host after 10 seconds..."
+if [ $TEST -eq 0 ]; then
+   setsid ssh -l root 192.168.0.109 "/bin/esxcli system shutdown poweroff -d 10 -r \"Automated ESXi host shutdown\""
+   setsid ssh -l root 192.168.0.108 "/bin/esxcli system shutdown poweroff -d 10 -r \"Automated ESXi host shutdown\""
+fi
+
+echo "ESXI hosts shutdown complete..."
